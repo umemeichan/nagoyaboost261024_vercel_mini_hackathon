@@ -1,166 +1,167 @@
-<script lang="ts">
-	import { enhance } from '$app/forms';
-	import type { ActionData, PageData } from './$types';
 
-	let { data, form }: { data: PageData; form: ActionData } = $props();
+const MAX_HISTORY = 500;
 
-	let drawing = $state(false);
+let selected = $state<Entry | null>(null);
+let history = $state<Entry[]>([]);
+let loading = $state(false);
+let error = $state('');
+let showHistory = $state(false);
+let searchText = $state('');
+let failedImage = $state(false);
 
-	const rankTone: Record<string, string> = {
-		大吉: '#c9a227',
-		中吉: '#b3261e',
-		小吉: '#b3261e',
-		吉: '#3f6d4e',
-		末吉: '#3f6d4e',
-		凶: '#4a4a4a',
-		大凶: '#2b2b2b'
+let filteredHistory = $derived(
+	history.filter((item) =>
+		item.name.includes(searchText.trim())
+	)
+);
+
+onMount(() => {
+	loadHistory();
+});
+
+async function loadHistory() {
+	try {
+		const response = await fetch('/api/dog-history');
+
+		if (!response.ok) throw new Error('履歴取得失敗');
+
+		const result = await response.json();
+		history = result.history ?? [];
+	} catch (e) {
+		console.error(e);
+		error = '履歴を読み込めませんでした。';
+	}
+}
+
+function wikipediaSearchUrl(name: string) {
+	return (
+		'https://ja.wikipedia.org/wiki/特別:検索?search=' +
+		encodeURIComponent(name)
+	);
+}
+
+async function getWikipediaInfo(
+	name: string
+): Promise<Omit<Entry, 'visitedAt'>> {
+	const fallback = {
+		name,
+		image: '',
+		wikiUrl: wikipediaSearchUrl(name),
+		articleFound: false
 	};
-</script>
 
-<svelte:head>
-	<title>おみくじ</title>
-	<meta name="description" content="SvelteKit 製のおみくじアプリ" />
-</svelte:head>
+	const params = new URLSearchParams({
+		action: 'query',
+		format: 'json',
+		formatversion: '2',
+		prop: 'pageimages|info',
+		pithumbsize: '900',
+		inprop: 'url',
+		redirects: '1',
+		titles: name,
+		origin: '*'
+	});
 
-<section class="card">
-	<h1>今日の運勢を占う</h1>
-	<p class="lead">おみくじを引くと、結果が自動で記録に残ります。</p>
+	try {
+		const response = await fetch(
+			'https://ja.wikipedia.org/w/api.php?' + params
+		);
 
-	<form
-		method="POST"
-		action="?/draw"
-		use:enhance={() => {
-			drawing = true;
-			return async ({ update }) => {
-				await update({ reset: false });
-				drawing = false;
-			};
-		}}
-	>
-		<button type="submit" disabled={drawing}>
-			{drawing ? '引いています…' : 'おみくじを引く'}
-		</button>
-	</form>
+		if (!response.ok) return fallback;
 
-	{#if form?.result}
-		<div class="result" style="--tone: {rankTone[form.result.rank] ?? 'var(--accent)'}">
-			<p class="rank">{form.result.rank}</p>
-			<p class="message">{form.result.message}</p>
-			<dl>
-				<div><dt>ラッキーカラー</dt><dd>{form.result.lucky.color}</dd></div>
-				<div><dt>ラッキーアイテム</dt><dd>{form.result.lucky.item}</dd></div>
-				<div><dt>ラッキーナンバー</dt><dd>{form.result.lucky.number}</dd></div>
-			</dl>
-			{#if !form.persisted}
-				<p class="warn">
-					※ 記録は一時保存です（Redis 未接続）。Upstash を設定すると永続化されます。
-				</p>
-			{/if}
-		</div>
-	{:else if data.lastDrawnAt}
-		<p class="note">
-			前回引いた日時: {new Date(data.lastDrawnAt).toLocaleString('ja-JP')}
-		</p>
-	{/if}
+		const result = await response.json();
+		const page = result?.query?.pages?.[0];
 
-	<p class="note">
-		<a href="/history">おみくじ記録を見る →</a>
-	</p>
-</section>
+		if (!page || page.missing === true || page.pageid == null) {
+			return fallback;
+		}
 
-<style>
-	.card {
-		background: var(--surface);
-		border: 1px solid var(--line);
-		border-radius: 1rem;
-		padding: 2rem 1.5rem;
-		text-align: center;
+		return {
+			name,
+			image: page.thumbnail?.source ?? '',
+			wikiUrl: page.fullurl ?? fallback.wikiUrl,
+			articleFound: true
+		};
+	} catch {
+		return fallback;
+	}
+}
+
+async function recommend() {
+	if (loading) return;
+
+	loading = true;
+	error = '';
+	failedImage = false;
+
+	const options = BREEDS.filter(
+		(name) => name !== selected?.name
+	);
+
+	const name =
+		options[Math.floor(Math.random() * options.length)];
+
+	try {
+		const info = await getWikipediaInfo(name);
+
+		const response = await fetch('/api/dog-history', {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json'
+			},
+			body: JSON.stringify(info)
+		});
+
+		if (!response.ok) throw new Error('保存失敗');
+
+		const result = await response.json();
+
+		selected = result.entry;
+		history = [result.entry, ...history].slice(
+			0,
+			MAX_HISTORY
+		);
+
+		showHistory = false;
+	} catch (e) {
+		console.error(e);
+		error = '履歴の保存に失敗しました。';
+	} finally {
+		loading = false;
+	}
+}
+
+function openFromHistory(item: Entry) {
+	selected = item;
+	failedImage = false;
+	error = '';
+	showHistory = false;
+}
+
+async function clearHistory() {
+	if (!window.confirm('閲覧履歴をすべて削除しますか？')) {
+		return;
 	}
 
-	h1 {
-		margin: 0 0 0.25rem;
-		font-size: 1.4rem;
-	}
+	try {
+		const response = await fetch('/api/dog-history', {
+			method: 'DELETE'
+		});
 
-	.lead {
-		margin: 0 0 1.75rem;
-		color: var(--muted);
-		font-size: 0.9rem;
-	}
+		if (!response.ok) throw new Error('削除失敗');
 
-	button {
-		font: inherit;
-		font-weight: 700;
-		padding: 0.85rem 2.5rem;
-		border: none;
-		border-radius: 999px;
-		background: var(--accent);
-		color: #fff;
-		cursor: pointer;
+		history = [];
+		error = '';
+	} catch (e) {
+		console.error(e);
+		error = '履歴を削除できませんでした。';
 	}
+}
 
-	button:disabled {
-		opacity: 0.6;
-		cursor: progress;
-	}
+function formatDate(value: string) {
+	const date = new Date(value);
 
-	.result {
-		margin-top: 2rem;
-		padding-top: 1.5rem;
-		border-top: 1px dashed var(--line);
-	}
-
-	.rank {
-		margin: 0;
-		font-size: 3rem;
-		font-weight: 800;
-		letter-spacing: 0.1em;
-		color: var(--tone);
-	}
-
-	.message {
-		margin: 0.5rem 0 1.5rem;
-	}
-
-	dl {
-		display: grid;
-		gap: 0.5rem;
-		margin: 0;
-		text-align: left;
-		max-width: 20rem;
-		margin-inline: auto;
-	}
-
-	dl > div {
-		display: flex;
-		justify-content: space-between;
-		border-bottom: 1px solid var(--line);
-		padding-bottom: 0.25rem;
-	}
-
-	dt {
-		color: var(--muted);
-		font-size: 0.85rem;
-	}
-
-	dd {
-		margin: 0;
-		font-weight: 600;
-	}
-
-	.warn {
-		margin-top: 1.25rem;
-		font-size: 0.75rem;
-		color: var(--muted);
-	}
-
-	.note {
-		margin-top: 1.5rem;
-		font-size: 0.85rem;
-		color: var(--muted);
-	}
-
-	.note a {
-		color: var(--accent);
-	}
-</style>
+	return Number.isNaN(date.getTime())
+		? value
+		: date.toLocaleString('ja-JP');
+}
